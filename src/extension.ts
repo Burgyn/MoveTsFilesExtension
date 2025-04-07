@@ -41,80 +41,81 @@ export function activate(context: vscode.ExtensionContext) {
             // Get relative path from workspace root
             const relativePath = path.relative(workspaceRoot, sourceFile);
             
-            // Ask for the target relative path
-            const targetRelativePath = await vscode.window.showInputBox({
-                prompt: 'Enter target relative path (e.g., libs/kros-auth/src/lib/base/application-type.model.ts)',
-                value: relativePath
-            });
+            // Show UI panel to collect all information
+            const panel = vscode.window.createWebviewPanel(
+                'moveTsForm',
+                'Move TypeScript File',
+                vscode.ViewColumn.One,
+                {
+                    enableScripts: true
+                }
+            );
 
-            if (!targetRelativePath) {
-                return;
-            }
-
-            // Try to detect old and new module names from paths
-            const oldModuleMatch = relativePath.match(/libs\/([^\/]+)/);
-            const newModuleMatch = targetRelativePath.match(/libs\/([^\/]+)/);
+            // Find available modules
+            const modules = await findAvailableModules(workspaceRoot);
             
-            let oldModulePath = oldModuleMatch ? oldModuleMatch[1] : '';
-            let newModulePath = newModuleMatch ? newModuleMatch[1] : '';
-
-            // Ask for the module names with @kros-sk prefix
-            const oldModule = await vscode.window.showInputBox({
-                prompt: 'Enter source module name with @kros-sk prefix (e.g., @kros-sk/models)',
-                value: oldModulePath ? `@kros-sk/${oldModulePath.replace('kros-', '')}` : ''
-            }) || '';
-
-            const newModule = await vscode.window.showInputBox({
-                prompt: 'Enter target module name with @kros-sk prefix (e.g., @kros-sk/auth)',
-                value: newModulePath ? `@kros-sk/${newModulePath.replace('kros-', '')}` : ''
-            }) || '';
-
-            if (!oldModule || !newModule) {
-                vscode.window.showErrorMessage('Module names are required');
-                return;
-            }
-
-            // Initialize ts-morph project
-            const project = new Project();
+            // Set the HTML content of the webview
+            panel.webview.html = getWebviewContent(relativePath, modules);
             
-            // Add the source file to find exported names
-            const sourceFilePath = path.relative(workspaceRoot, sourceFile);
-            const tsSourceFile = project.addSourceFileAtPath(sourceFile);
-            
-            // Find all exported names in the source file
-            const exportedNames = findExportedNames(tsSourceFile);
-            
-            if (exportedNames.length === 0) {
-                vscode.window.showErrorMessage('No exported types or classes found in the source file');
-                return;
-            }
+            // Handle messages from the webview
+            panel.webview.onDidReceiveMessage(
+                async message => {
+                    switch (message.command) {
+                        case 'moveFile':
+                            // Close the panel
+                            panel.dispose();
+                            
+                            // Process the form data
+                            const targetRelativePath = message.targetPath;
+                            const oldModule = message.sourceModule;
+                            const newModule = message.targetModule;
+                            
+                            // Initialize ts-morph project
+                            const project = new Project();
+                            
+                            // Add the source file to find exported names
+                            const tsSourceFile = project.addSourceFileAtPath(sourceFile);
+                            
+                            // Find all exported names in the source file
+                            const exportedNames = findExportedNames(tsSourceFile);
+                            
+                            if (exportedNames.length === 0) {
+                                vscode.window.showErrorMessage('No exported types or classes found in the source file');
+                                return;
+                            }
 
-            console.log(`Found exported names: ${exportedNames.join(', ')}`);
+                            console.log(`Found exported names: ${exportedNames.join(', ')}`);
 
-            // Construct target path
-            const targetPath = path.join(workspaceRoot, targetRelativePath);
+                            // Construct target path
+                            const targetPath = path.join(workspaceRoot, targetRelativePath);
 
-            // Log the move operation
-            vscode.window.showInformationMessage(`Moving file from ${relativePath} to ${targetRelativePath}`);
-            console.log(`Moving file from ${relativePath} to ${targetRelativePath}`);
-            console.log(`Old module: ${oldModule}, New module: ${newModule}`);
-            console.log(`Exported names: ${exportedNames.join(', ')}`);
+                            // Log the move operation
+                            vscode.window.showInformationMessage(`Moving file from ${relativePath} to ${targetRelativePath}`);
+                            console.log(`Moving file from ${relativePath} to ${targetRelativePath}`);
+                            console.log(`Old module: ${oldModule}, New module: ${newModule}`);
+                            console.log(`Exported names: ${exportedNames.join(', ')}`);
 
-            // Create target directory if it doesn't exist
-            const targetDir = path.dirname(targetPath);
-            if (!fs.existsSync(targetDir)) {
-                fs.mkdirSync(targetDir, { recursive: true });
-                console.log(`Created target directory: ${targetDir}`);
-            }
+                            // Create target directory if it doesn't exist
+                            const targetDir = path.dirname(targetPath);
+                            if (!fs.existsSync(targetDir)) {
+                                fs.mkdirSync(targetDir, { recursive: true });
+                                console.log(`Created target directory: ${targetDir}`);
+                            }
 
-            // Move the file
-            await vscode.workspace.fs.rename(uri, vscode.Uri.file(targetPath));
-            console.log(`File moved successfully`);
+                            // Move the file
+                            await vscode.workspace.fs.rename(uri, vscode.Uri.file(targetPath));
+                            console.log(`File moved successfully`);
 
-            // Update imports in all TypeScript files
-            await updateImports(workspaceRoot, exportedNames, oldModule, newModule);
+                            // Update imports in all TypeScript files
+                            await updateImports(workspaceRoot, exportedNames, oldModule, newModule);
 
-            vscode.window.showInformationMessage(`File moved and imports updated successfully`);
+                            vscode.window.showInformationMessage(`File moved and imports updated successfully`);
+                            break;
+                    }
+                },
+                undefined,
+                context.subscriptions
+            );
         } catch (error) {
             vscode.window.showErrorMessage(`Error: ${error}`);
             console.error(`Error: ${error}`);
@@ -122,6 +123,156 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     context.subscriptions.push(disposable);
+}
+
+/**
+ * Gets the HTML content for the webview
+ */
+function getWebviewContent(relativePath: string, modules: string[]): string {
+    const moduleOptions = modules.map(mod => `<option value="@kros-sk/${mod}">${mod}</option>`).join('\n');
+    
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Move TypeScript File</title>
+    <style>
+        body {
+            font-family: var(--vscode-font-family);
+            padding: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        input, select {
+            width: 100%;
+            padding: 8px;
+            box-sizing: border-box;
+            background-color: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border: 1px solid var(--vscode-input-border);
+        }
+        button {
+            background-color: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            padding: 8px 12px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: var(--vscode-button-hoverBackground);
+        }
+    </style>
+</head>
+<body>
+    <h2>Move TypeScript File</h2>
+    <div class="form-group">
+        <label for="currentPath">Current Path:</label>
+        <input type="text" id="currentPath" value="${relativePath}" readonly>
+    </div>
+    <div class="form-group">
+        <label for="targetPath">Target Path:</label>
+        <input type="text" id="targetPath" value="${relativePath}">
+    </div>
+    <div class="form-group">
+        <label for="sourceModule">Source Module:</label>
+        <select id="sourceModule">
+            ${moduleOptions}
+        </select>
+    </div>
+    <div class="form-group">
+        <label for="targetModule">Target Module:</label>
+        <select id="targetModule">
+            ${moduleOptions}
+        </select>
+    </div>
+    <button id="moveButton">Move and Update Imports</button>
+
+    <script>
+        const vscode = acquireVsCodeApi();
+        
+        // Try to detect source module from path
+        const currentPath = document.getElementById('currentPath').value;
+        const sourceModuleSelect = document.getElementById('sourceModule');
+        const targetPathInput = document.getElementById('targetPath');
+        const targetModuleSelect = document.getElementById('targetModule');
+        
+        // Initialize source module based on path
+        const moduleMatch = currentPath.match(/libs\\/([^\\\\]+)/);
+        if (moduleMatch && moduleMatch[1]) {
+            const moduleName = moduleMatch[1].replace('kros-', '');
+            
+            // Select the matching option
+            Array.from(sourceModuleSelect.options).forEach(option => {
+                if (option.text === moduleName) {
+                    option.selected = true;
+                }
+            });
+        }
+        
+        // Update target module when target path changes
+        targetPathInput.addEventListener('input', function() {
+            const targetPath = this.value;
+            const targetModuleMatch = targetPath.match(/libs\\/([^\\\\]+)/);
+            
+            if (targetModuleMatch && targetModuleMatch[1]) {
+                const targetModuleName = targetModuleMatch[1].replace('kros-', '');
+                
+                // Select the matching option
+                Array.from(targetModuleSelect.options).forEach(option => {
+                    if (option.text === targetModuleName) {
+                        option.selected = true;
+                    }
+                });
+            }
+        });
+        
+        // Handle form submission
+        document.getElementById('moveButton').addEventListener('click', () => {
+            vscode.postMessage({
+                command: 'moveFile',
+                targetPath: document.getElementById('targetPath').value,
+                sourceModule: document.getElementById('sourceModule').value,
+                targetModule: document.getElementById('targetModule').value
+            });
+        });
+    </script>
+</body>
+</html>`;
+}
+
+/**
+ * Finds available modules in the workspace
+ */
+async function findAvailableModules(workspaceRoot: string): Promise<string[]> {
+    const modules: string[] = [];
+    
+    try {
+        const libsPath = path.join(workspaceRoot, 'libs');
+        
+        // Check if libs directory exists
+        if (fs.existsSync(libsPath)) {
+            const entries = fs.readdirSync(libsPath, { withFileTypes: true });
+            
+            // Filter directories
+            for (const entry of entries) {
+                if (entry.isDirectory()) {
+                    // Extract module name without 'kros-' prefix
+                    const moduleName = entry.name.replace('kros-', '');
+                    modules.push(moduleName);
+                }
+            }
+        }
+    } catch (error) {
+        console.error(`Error finding modules: ${error}`);
+    }
+    
+    return modules;
 }
 
 function findExportedNames(sourceFile: SourceFile): string[] {
